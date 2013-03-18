@@ -196,13 +196,13 @@ static BOOL memsrch(const unsigned char* needle, NSUInteger needle_len,
     if (!didCollide) break; // we're fine, no more attempts needed
 
     // try again with a random number appended
-    boundary = [NSString stringWithFormat:@"%@_%08lx", kBaseBoundary,
+    boundary = [NSString stringWithFormat:@"%@_%08x", kBaseBoundary,
                 [self random]];
   }
 
   if (didCollide) {
     // fallback... two random numbers
-    boundary = [NSString stringWithFormat:@"%08lx_tedborg_%08lx",
+    boundary = [NSString stringWithFormat:@"%08x_tedborg_%08x",
                                           [self random], [self random]];
   }
 
@@ -267,7 +267,7 @@ static BOOL memsrch(const unsigned char* needle, NSUInteger needleLen,
   const unsigned char* ptr = haystack;
   NSUInteger remain = haystackLen;
   while ((ptr = memchr(ptr, needle[0], remain)) != 0) {
-    remain = haystackLen - (ptr - haystack);
+    remain = haystackLen - (NSUInteger)(ptr - haystack);
     if (remain < needleLen) {
       return NO;
     }

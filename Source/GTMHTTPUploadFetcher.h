@@ -17,8 +17,8 @@
 //  GTMHTTPUploadFetcher.h
 //
 
-#if (!GDATA_REQUIRE_SERVICE_INCLUDES && !GTL_REQUIRE_SERVICE_INCLUDES) \
-  || GDATA_INCLUDE_DOCS_SERVICE || GDATA_INCLUDE_YOUTUBE_SERVICE || GDATA_INCLUDE_PHOTOS_SERVICE
+#if (!GDATA_REQUIRE_SERVICE_INCLUDES) || GDATA_INCLUDE_DOCS_SERVICE || \
+  GDATA_INCLUDE_YOUTUBE_SERVICE || GDATA_INCLUDE_PHOTOS_SERVICE
 
 //
 // This subclass of GTMHTTPFetcher simulates the series of fetches
@@ -39,6 +39,7 @@
 #pragma once
 
 #import "GTMHTTPFetcher.h"
+#import "GTMHTTPFetcherService.h"
 
 // async retrieval of an http get or post
 @interface GTMHTTPUploadFetcher : GTMHTTPFetcher {
@@ -56,7 +57,16 @@
   NSUInteger initialBodySent_;
 
   NSURL *locationURL_;
-
+#if NS_BLOCKS_AVAILABLE
+  void (^locationChangeBlock_)(NSURL *);
+#elif !__LP64__
+  // placeholders: for 32-bit builds, keep the size of the object's ivar section
+  // the same with and without blocks
+#ifndef __clang_analyzer__
+  id locationChangePlaceholder_;
+#endif
+#endif
+  
   // uploadData_ or uploadFileHandle_ may be set, but not both
   NSData *uploadData_;
   NSFileHandle *uploadFileHandle_;
@@ -64,6 +74,7 @@
   NSString *uploadMIMEType_;
   NSUInteger chunkSize_;
   BOOL isPaused_;
+  BOOL isRestartedUpload_;
 
   // we keep the latest offset into the upload data just for
   // progress reporting
@@ -76,21 +87,22 @@
 }
 
 + (GTMHTTPUploadFetcher *)uploadFetcherWithRequest:(NSURLRequest *)request
-                                          uploadData:(NSData *)data
-                                      uploadMIMEType:(NSString *)uploadMIMEType
-                                           chunkSize:(NSUInteger)chunkSize;
+                                        uploadData:(NSData *)data
+                                    uploadMIMEType:(NSString *)uploadMIMEType
+                                         chunkSize:(NSUInteger)chunkSize
+                                    fetcherService:(GTMHTTPFetcherService *)fetcherServiceOrNil;
 
 + (GTMHTTPUploadFetcher *)uploadFetcherWithRequest:(NSURLRequest *)request
-                                    uploadFileHandle:(NSFileHandle *)fileHandle
-                                      uploadMIMEType:(NSString *)uploadMIMEType
-                                           chunkSize:(NSUInteger)chunkSize;
+                                  uploadFileHandle:(NSFileHandle *)fileHandle
+                                    uploadMIMEType:(NSString *)uploadMIMEType
+                                         chunkSize:(NSUInteger)chunkSize
+                                    fetcherService:(GTMHTTPFetcherService *)fetcherServiceOrNil;
 
-- (id)initWithRequest:(NSURLRequest *)request
-           uploadData:(NSData *)data
-     uploadFileHandle:(NSFileHandle *)fileHandle
-       uploadMIMEType:(NSString *)uploadMIMEType
-            chunkSize:(NSUInteger)chunkSize;
-
++ (GTMHTTPUploadFetcher *)uploadFetcherWithLocation:(NSURL *)locationURL
+                                   uploadFileHandle:(NSFileHandle *)fileHandle
+                                     uploadMIMEType:(NSString *)uploadMIMEType
+                                          chunkSize:(NSUInteger)chunkSize
+                                     fetcherService:(GTMHTTPFetcherService *)fetcherServiceOrNil;
 - (void)pauseFetching;
 - (void)resumeFetching;
 - (BOOL)isPaused;
@@ -101,6 +113,13 @@
 @property (copy) NSString *uploadMIMEType;
 @property (assign) NSUInteger chunkSize;
 @property (assign) NSUInteger currentOffset;
+
+#if NS_BLOCKS_AVAILABLE
+// When the upload location changes, the optional locationChangeBlock will be
+// called. It will be called with nil once upload succeeds or can no longer
+// be attempted.
+@property (copy) void (^locationChangeBlock)(NSURL *locationURL);
+#endif
 
 // the fetcher for the current data chunk, if any
 @property (retain) GTMHTTPFetcher *chunkFetcher;
@@ -117,4 +136,4 @@
 
 @end
 
-#endif // #if (!GDATA_REQUIRE_SERVICE_INCLUDES && !GTL_REQUIRE_SERVICE_INCLUDES)
+#endif // #if !GDATA_REQUIRE_SERVICE_INCLUDES

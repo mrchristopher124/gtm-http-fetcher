@@ -42,7 +42,10 @@
   NSUInteger maxRunningFetchersPerHost_;
 
   GTMHTTPFetchHistory *fetchHistory_;
+  NSOperationQueue *delegateQueue_;
   NSArray *runLoopModes_;
+  NSString *userAgent_;
+  NSTimeInterval timeout_;
   NSURLCredential *credential_;       // username & password
   NSURLCredential *proxyCredential_;  // credential supplied to proxy servers
   NSInteger cookieStorageMethod_;
@@ -62,19 +65,37 @@
 - (GTMHTTPFetcher *)fetcherWithRequest:(NSURLRequest *)request;
 - (GTMHTTPFetcher *)fetcherWithURL:(NSURL *)requestURL;
 - (GTMHTTPFetcher *)fetcherWithURLString:(NSString *)requestURLString;
+- (id)fetcherWithRequest:(NSURLRequest *)request
+            fetcherClass:(Class)fetcherClass;
 
 // Queues of delayed and running fetchers. Each dictionary contains arrays
 // of fetchers, keyed by host
 //
 // A max value of 0 means no fetchers should be delayed.
+//
+// The default limit is 10 simultaneous fetchers targeting each host.
 @property (assign) NSUInteger maxRunningFetchersPerHost;
 @property (retain, readonly) NSDictionary *delayedHosts;
 @property (retain, readonly) NSDictionary *runningHosts;
+
+- (BOOL)isDelayingFetcher:(GTMHTTPFetcher *)fetcher;
+
+- (NSUInteger)numberOfFetchers;        // running + delayed fetchers
+- (NSUInteger)numberOfRunningFetchers;
+- (NSUInteger)numberOfDelayedFetchers;
+
+// Search for running or delayed fetchers with the specified URL.
+//
+// Returns an array of fetcher objects found, or nil if none found.
+- (NSArray *)issuedFetchersWithRequestURL:(NSURL *)requestURL;
 
 - (void)stopAllFetchers;
 
 // Properties to be applied to each fetcher;
 // see GTMHTTPFetcher.h for descriptions
+@property (copy) NSString *userAgent;
+@property (assign) NSTimeInterval timeout;
+@property (retain) NSOperationQueue *delegateQueue;
 @property (retain) NSArray *runLoopModes;
 @property (retain) NSURLCredential *credential;
 @property (retain) NSURLCredential *proxyCredential;
@@ -91,5 +112,14 @@
 - (void)clearHistory;
 
 @property (nonatomic, retain) id <GTMFetcherAuthorizationProtocol> authorizer;
+
+// Spin the run loop, discarding events, until all running and delayed fetchers
+// have completed
+//
+// This is only for use in testing or in tools without a user interface.
+//
+// Synchronous fetches should never be done by shipping apps; they are
+// sufficient reason for rejection from the app store.
+- (void)waitForCompletionOfAllFetchersWithTimeout:(NSTimeInterval)timeoutInSeconds;
 
 @end
