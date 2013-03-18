@@ -27,6 +27,10 @@
 - (id)objectWithString:(NSString*)jsonrep error:(NSError**)error;
 @end
 
+@interface GTMNSJSONSerialization : NSObject
++ (id)JSONObjectWithData:(NSData *)data options:(NSUInteger)opt error:(NSError **)error;
+@end
+
 @implementation GTMHTTPFetcherTestServer
 
 - (id)initWithDocRoot:(NSString *)docRoot {
@@ -75,29 +79,18 @@
 }
 
 - (id)JSONFromData:(NSData *)data {
-  // TODO - replace with the system JSON parser
-  Class jsonClass = NSClassFromString(@"SBJsonParser");
-  if (!jsonClass) {
-    jsonClass = NSClassFromString(@"SBJSON");
-  }
-  if (!jsonClass) {
-    NSLog(@"JSON parser missing");
-  } else {
-    GTMSBJSON *parser = [[[jsonClass alloc] init] autorelease];
+  NSError *error = nil;
+  const NSUInteger kOpts = NSJSONReadingMutableContainers;
+  id obj = [NSJSONSerialization JSONObjectWithData:data
+                                           options:kOpts
+                                             error:&error];
+  if (obj == nil) {
     NSString *jsonStr = [[[NSString alloc] initWithData:data
                                                encoding:NSUTF8StringEncoding] autorelease];
-    if (jsonStr) {
-      // convert from JSON string to NSObject
-      NSError *error = nil;
-      id obj = [parser objectWithString:jsonStr error:&error];
-      if (obj == nil) {
-        NSLog(@"JSON parse error: %@\n  for JSON string: %@",
-              error, jsonStr);
-      }
-      return obj;
-    }
+    NSLog(@"JSON parse error: %@\n  for JSON string: %@",
+          error, jsonStr);
   }
-  return nil;
+  return obj;
 }
 
 - (GTMHTTPResponseMessage *)httpServer:(GTMHTTPServer *)server
@@ -105,7 +98,7 @@
   NSAssert(server == server_, @"how'd we get a different server?!");
 
   GTMHTTPResponseMessage *response;
-  UInt32 resultStatus = 0;
+  int resultStatus = 0;
   NSData *data = nil;
   NSMutableDictionary *responseHeaders = [NSMutableDictionary dictionary];
 
@@ -189,12 +182,19 @@
 
   // if there's an "auth=foo" query parameter, then the value of the
   // Authorization header should be "foo"
-  NSString *authStr = [self valueForParameter:@"oauth" query:query];
+  NSString *authStr = [self valueForParameter:@"oauth2" query:query];
   if (authStr) {
-    NSString *oauthMatch = [@"OAuth " stringByAppendingString:authStr];
-    if (![authorization isEqualToString:oauthMatch]) {
+    NSString *bearerStr = [@"Bearer " stringByAppendingString:authStr];
+    if (authorization == nil
+        || ![authorization isEqualToString:bearerStr]) {
       // return status 401 Unauthorized
-      GTMHTTPResponseMessage *response = [GTMHTTPResponseMessage emptyResponseWithCode:401];
+      NSString *errStr = [NSString stringWithFormat:@"Authorization \"%@\" should be \"%@\"",
+                          authorization, bearerStr];
+      NSData *errData = [errStr dataUsingEncoding:NSUTF8StringEncoding];
+      GTMHTTPResponseMessage *response;
+      response = [GTMHTTPResponseMessage responseWithBody:errData
+                                              contentType:@"text/plain"
+                                               statusCode:401];
       return response;
     }
   }
@@ -205,7 +205,7 @@
     // status code
     resultStatus = [statusStr intValue];
 
-    NSString *template = @"{ \"error\" : { \"message\" : \"Server Status %u\","
+    NSString *const template = @"{ \"error\" : { \"message\" : \"Server Status %u\","
                          @" \"code\" : %u } }";
     NSString *errorStr = [NSString stringWithFormat:template,
                           resultStatus, resultStatus];
@@ -260,20 +260,12 @@
               NSLog(@"Cannot find query response file \"%@\"", responsePath);
             }
           } else {
-            // the actual request did not match the expected request;
-            // log what's different
-            NSMutableSet *differentKeys = [NSMutableSet set];
-            NSArray *allKeys = [[requestJSON allKeys] arrayByAddingObjectsFromArray:[expectedJSON allKeys]];
-            for (NSString *key in allKeys) {
-              id requestValue = [requestJSON objectForKey:key];
-              id expectedValue = [expectedJSON objectForKey:key];
-              BOOL doesMatch = (requestValue == expectedValue
-                                || (requestValue && expectedValue
-                                    && [requestValue isEqual:expectedValue]));
-              if (!doesMatch) [differentKeys addObject:key];
-            }
-            NSLog(@"Mismatched request body for \"%@\" in keys (%@)", path,
-                  [[differentKeys allObjects] componentsJoinedByString:@", "]);
+            // the actual request did not match the expected request
+            //
+            // note that the requests may be dictionaries or arrays
+            NSLog(@"Mismatched request body for \"%@\"", path);
+            NSLog(@"\n--------\nExpected request:\n%@", expectedJSON);
+            NSLog(@"\n--------\nActual request:\n%@", requestJSON);
           }
         }
       }

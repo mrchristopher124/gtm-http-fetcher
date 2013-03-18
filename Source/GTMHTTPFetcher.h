@@ -77,6 +77,33 @@
 //        Status codes are at <http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html>
 //
 //
+// Threading and queue support:
+//
+// Callbacks require either that the thread used to start the fetcher have a run
+// loop spinning (typically the main thread), or that an NSOperationQueue be
+// provided upon which the delegate callbacks will be called.  Starting with
+// iOS 6 and Mac OS X 10.7, clients may simply create an operation queue for
+// callbacks on a background thread:
+//
+//   fetcher.delegateQueue = [[[NSOperationQueue alloc] init] autorelease];
+//
+// or specify the main queue for callbacks on the main thread:
+//
+//   fetcher.delegateQueue = [NSOperationQueue mainQueue];
+//
+// The client may also re-dispatch from the callbacks and notifications to
+// a known dispatch queue:
+//
+//  [myFetcher beginFetchWithCompletionHandler:^(NSData *retrievedData, NSError *error) {
+//    if (error == nil) {
+//      dispatch_async(myDispatchQueue, ^{
+//        ...
+//     });
+//    }
+//  }];
+//
+//
+//
 // Downloading to disk:
 //
 // To have downloaded data saved directly to disk, specify either a path for the
@@ -287,7 +314,32 @@ enum {
   kGTMHTTPFetcherCookieStorageMethodNone = 3
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
+
+// Utility functions for applications self-identifying to servers via a
+// user-agent header
+
+// Make a proper app name without whitespace from the given string, removing
+// whitespace and other characters that may be special parsed marks of
+// the full user-agent string.
+NSString *GTMCleanedUserAgentString(NSString *str);
+
+// Make an identifier like "MacOSX/10.7.1" or "iPod_Touch/4.1"
+NSString *GTMSystemVersionString(void);
+
+// Make a generic name and version for the current application, like
+// com.example.MyApp/1.2.3 relying on the bundle identifier and the
+// CFBundleShortVersionString or CFBundleVersion.  If no bundle ID
+// is available, the process name preceded by "proc_" is used.
+NSString *GTMApplicationIdentifier(NSBundle *bundle);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
 
 @class GTMHTTPFetcher;
 
@@ -315,6 +367,19 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 - (void)removeCachedDataForRequest:(NSURLRequest *)request;
 @end
 
+@protocol GTMHTTPFetcherServiceProtocol <NSObject>
+// This protocol allows us to call into the service without requiring
+// GTMHTTPFetcherService sources in this project
+
+@property (retain) NSOperationQueue *delegateQueue;
+
+- (BOOL)fetcherShouldBeginFetching:(GTMHTTPFetcher *)fetcher;
+- (void)fetcherDidStop:(GTMHTTPFetcher *)fetcher;
+
+- (GTMHTTPFetcher *)fetcherWithRequest:(NSURLRequest *)request;
+- (BOOL)isDelayingFetcher:(GTMHTTPFetcher *)fetcher;
+@end
+
 @protocol GTMFetcherAuthorizationProtocol <NSObject>
 @required
 // This protocol allows us to call the authorizer without requiring its sources
@@ -325,18 +390,18 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 
 - (void)stopAuthorization;
 
+- (void)stopAuthorizationForRequest:(NSURLRequest *)request;
+
+- (BOOL)isAuthorizingRequest:(NSURLRequest *)request;
+
 - (BOOL)isAuthorizedRequest:(NSURLRequest *)request;
 
 - (NSString *)userEmail;
-@end
 
-@protocol GTMHTTPFetcherServiceProtocol <NSObject>
-// This protocol allows us to call into the service without requiring
-// GTMHTTPFetcherService sources in this project
-- (BOOL)fetcherShouldBeginFetching:(GTMHTTPFetcher *)fetcher;
-- (void)fetcherDidStop:(GTMHTTPFetcher *)fetcher;
+@optional
+@property (assign) id <GTMHTTPFetcherServiceProtocol> fetcherService; // WEAK
 
-- (GTMHTTPFetcher *)fetcherWithRequest:(NSURLRequest *)request;
+- (BOOL)primeForRefresh;
 @end
 
 // GTMHTTPFetcher objects are used for async retrieval of an http get or post
@@ -383,16 +448,18 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 #endif
   id userData_;                     // retained, if set by caller
   NSMutableDictionary *properties_; // more data retained for caller
-  NSArray *runLoopModes_;           // optional, for 10.5 and later
+  NSArray *runLoopModes_;           // optional
+  NSOperationQueue *delegateQueue_; // optional; available iOS 6/10.7 and later
   id <GTMHTTPFetchHistoryProtocol> fetchHistory_; // if supplied by the caller, used for Last-Modified-Since checks and cookies
   NSInteger cookieStorageMethod_;   // constant from above
   id <GTMCookieStorageProtocol> cookieStorage_;
-  
+
   id <GTMFetcherAuthorizationProtocol> authorizer_;
 
   // the service object that created and monitors this fetcher, if any
   id <GTMHTTPFetcherServiceProtocol> service_;
   NSString *serviceHost_;
+  NSInteger servicePriority_;
   NSThread *thread_;
 
   BOOL isRetryEnabled_;             // user wants auto-retry
@@ -403,9 +470,15 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
   NSTimeInterval minRetryInterval_; // random between 1 and 2 seconds
   NSTimeInterval retryFactor_;      // default interval multiplier is 2
   NSTimeInterval lastRetryInterval_;
+  BOOL hasAttemptedAuthRefresh_;
 
   NSString *comment_;               // comment for log
   NSString *log_;
+#if !STRIP_GTM_FETCH_LOGGING
+  NSString *logRequestBody_;
+  NSString *logResponseBody_;
+  BOOL shouldDeferResponseBodyLogging_;
+#endif
 }
 
 // Create a fetcher
@@ -460,7 +533,15 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // The host, if any, used to classify this fetcher in the fetcher service
 @property (copy) NSString *serviceHost;
 
-// The thread used to run this fetcher in the fetcher service
+// The priority, if any, used for starting fetchers in the fetcher service
+//
+// Lower values are higher priority; the default is 0, and values may
+// be negative or positive. This priority affects only the start order of
+// fetchers that are being delayed by a fetcher service.
+@property (assign) NSInteger servicePriority;
+
+// The thread used to run this fetcher in the fetcher service when no operation
+// queue is provided.
 @property (retain) NSThread *thread;
 
 // The delegate is retained during the connection
@@ -492,7 +573,8 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 //  - (void)myFetcher:(GTMHTTPFetcher *)fetcher
 //       receivedData:(NSData *)dataReceivedSoFar;
 //
-// The dataReceived argument will be nil when downloading to a file handle.
+// The dataReceived argument will be nil when downloading to a path or to a
+// file handle.
 //
 // Applications should not use this method to accumulate the received data;
 // the callback method or block supplied to the beginFetch call will have
@@ -505,7 +587,8 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // editor
 @property (copy) void (^sentDataBlock)(NSInteger bytesSent, NSInteger totalBytesSent, NSInteger bytesExpectedToSend);
 
-// The dataReceived argument will be nil when downloading to a file handle
+// The dataReceived argument will be nil when downloading to a path or to
+// a file handle
 @property (copy) void (^receivedDataBlock)(NSData *dataReceivedSoFar);
 #endif
 
@@ -560,6 +643,8 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // finishedSEL has a signature like:
 //   - (void)fetcher:(GTMHTTPFetcher *)fetcher finishedWithData:(NSData *)data error:(NSError *)error;
 //
+// If the application has specified a downloadPath or downloadFileHandle
+// for the fetcher, the data parameter passed to the callback will be nil.
 
 - (BOOL)beginFetchWithDelegate:(id)delegate
              didFinishSelector:(SEL)finishedSEL;
@@ -616,7 +701,7 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 @property (retain) id userData;
 
 // Stored property values are retained for the convenience of the caller
-@property (retain) NSDictionary *properties;
+@property (copy) NSMutableDictionary *properties;
 
 - (void)setProperty:(id)obj forKey:(NSString *)key; // pass nil obj to remove property
 - (id)propertyForKey:(NSString *)key;
@@ -626,10 +711,15 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // Comments are useful for logging
 @property (copy) NSString *comment;
 
-- (void)setCommentWithFormat:(id)format, ...;
+- (void)setCommentWithFormat:(NSString *)format, ... NS_FORMAT_FUNCTION(1, 2);
 
 // Log of request and response, if logging is enabled
 @property (copy) NSString *log;
+
+// Callbacks can be invoked on an operation queue rather than via the run loop,
+// starting on 10.7 and iOS 6.  If a delegate queue is supplied. the run loop
+// modes are ignored.
+@property (retain) NSOperationQueue *delegateQueue;
 
 // Using the fetcher while a modal dialog is displayed requires setting the
 // run-loop modes to include NSModalPanelRunLoopMode
@@ -644,6 +734,9 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // Spin the run loop, discarding events, until the fetch has completed
 //
 // This is only for use in testing or in tools without a user interface.
+//
+// Synchronous fetches should never be done by shipping apps; they are
+// sufficient reason for rejection from the app store.
 - (void)waitForCompletionWithTimeout:(NSTimeInterval)timeoutInSeconds;
 
 #if STRIP_GTM_FETCH_LOGGING

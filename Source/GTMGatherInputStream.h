@@ -28,6 +28,8 @@
 #if defined(GTL_TARGET_NAMESPACE)
   // we need NSInteger for the 10.4 SDK, or we're using target namespace macros
   #import "GTLDefines.h"
+#elif defined(GDATA_TARGET_NAMESPACE)
+  #import "GDataDefines.h"
 #endif
 
 // Define <NSStreamDelegate> only for Mac OS X 10.6+ or iPhone OS 4.0+.
@@ -45,7 +47,7 @@
   NSUInteger arrayIndex_;       // Index in the array of the current NSData.
   long long dataOffset_; // Offset in the current NSData we are processing.
 
-  __weak id delegate_;          // stream delegate, defaults to self
+  id delegate_;          // WEAK, stream delegate, defaults to self
 
   // Since various undocumented methods get called on a stream, we'll
   // use a 1-byte dummy stream object to handle all unexpected messages.

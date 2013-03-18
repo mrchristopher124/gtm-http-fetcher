@@ -78,8 +78,10 @@ static NSString *kResponse = @"Response";
     }
     delegate_ = delegate;
 
+#ifndef NS_BLOCK_ASSERTIONS
     BOOL isDelegateOK = [delegate_ respondsToSelector:@selector(httpServer:handleRequest:)];
     NSAssert(isDelegateOK, @"GTMHTTPServer delegate lacks handleRequest sel");
+#endif
 
     localhostOnly_ = YES;
     connections_ = [[NSMutableArray alloc] init];
@@ -493,7 +495,7 @@ startFailed:
 
 - (BOOL)appendData:(NSData *)data {
   return CFHTTPMessageAppendBytes(message_,
-                                  [data bytes], [data length]) ? YES : NO;
+                                  [data bytes], (CFIndex)[data length]) ? YES : NO;
 }
 
 - (NSString *)headerFieldValueForKey:(NSString *)key {
@@ -505,7 +507,7 @@ startFailed:
 }
 
 - (UInt32)contentLength {
-  return [[self headerFieldValueForKey:@"Content-Length"] intValue];
+  return (UInt32)[[self headerFieldValueForKey:@"Content-Length"] intValue];
 }
 
 - (void)setBody:(NSData *)body {

@@ -70,11 +70,23 @@ static NSString *const kValidFileName = @"gettysburgaddress.txt";
     }
     return counter;
   };
-
+  
   NSUInteger (^FetchersPerHost) (NSArray *, NSString *) = ^(NSArray *fetchers,
                                                             NSString *host) {
     NSArray *fetcherURLs = [fetchers valueForKeyPath:@"mutableRequest.URL"];
     return URLsPerHost(fetcherURLs, host);
+  };
+
+  // Utility block for finding the minimum priority fetcher for a specific host
+  NSInteger (^PriorityPerHost) (NSArray *, NSString *) = ^(NSArray *fetchers,
+                                                            NSString *host) {
+    NSInteger val = NSIntegerMax;
+    for (GTMHTTPFetcher *fetcher in fetchers) {
+      if ([host isEqual:[[fetcher.mutableRequest URL] host]]) {
+        val = MIN(val, fetcher.servicePriority);
+      }
+    }
+    return val;
   };
 
   // We'll verify we fetched from the server the same data that is on disk
@@ -87,9 +99,14 @@ static NSString *const kValidFileName = @"gettysburgaddress.txt";
   // 1 should fail; the rest should succeeed.
   const NSUInteger kMaxRunningFetchersPerHost = 2;
 
+  NSString *const kUserAgent = @"ServiceTest-UA";
+  const NSTimeInterval kTimeout = 55;
+
   GTMHTTPFetcherService *service = [[[GTMHTTPFetcherService alloc] init] autorelease];
   service.maxRunningFetchersPerHost = kMaxRunningFetchersPerHost;
   service.fetchHistory.shouldRememberETags = NO;
+  service.userAgent = kUserAgent;
+  service.timeout = kTimeout;
 
   // Make URLs for a valid fetch, a fetch that returns a status error,
   // and a valid fetch with a different host
@@ -106,7 +123,7 @@ static NSString *const kValidFileName = @"gettysburgaddress.txt";
   STAssertEqualObjects([validFileURL host], @"localhost", @"unexpected host");
   STAssertEqualObjects([invalidFileURL host], @"localhost", @"unexpected host");
   STAssertEqualObjects([altValidURL host], @"127.0.0.1", @"unexpected host");
-                    
+
   // Make an array with the urls from the different hosts, including one
   // that will fail with a status 400 error
   NSMutableArray *urlArray = [NSMutableArray array];
@@ -121,6 +138,8 @@ static NSString *const kValidFileName = @"gettysburgaddress.txt";
   __block NSMutableArray *running = [NSMutableArray array];
   __block NSMutableArray *completed = [NSMutableArray array];
 
+  NSUInteger priorityVal = 0;
+
   // Create all the fetchers
   for (NSURL *fileURL in urlArray) {
     GTMHTTPFetcher *fetcher = [service fetcherWithURL:fileURL];
@@ -130,14 +149,47 @@ static NSString *const kValidFileName = @"gettysburgaddress.txt";
                     object:fetcher
                      queue:nil
                 usingBlock:^(NSNotification *note) {
-                  // Verify that we have at most two fetchers running
+                  // Verify that we have at most two fetchers running for this
+                  // fetcher's host
                   [running addObject:fetcher];
                   [pending removeObject:fetcher];
 
-                  NSString *host = [[[fetcher mutableRequest] URL] host];
+                  NSMutableURLRequest *fetcherReq = [fetcher mutableRequest];
+                  NSURL *fetcherReqURL = [fetcherReq URL];
+                  NSString *host = [fetcherReqURL host];
                   NSUInteger numberRunning = FetchersPerHost(running, host);
                   STAssertTrue(numberRunning > 0, @"count error");
-                  STAssertTrue(numberRunning <= kMaxRunningFetchersPerHost, @"too many running");
+                  STAssertTrue(numberRunning <= kMaxRunningFetchersPerHost,
+                               @"too many running");
+
+                  NSInteger pendingPriority = PriorityPerHost(pending, host);
+                  STAssertTrue(fetcher.servicePriority <= pendingPriority,
+                               @"a pending fetcher has greater priority");
+
+                  STAssertEquals([service numberOfFetchers],
+                                 [running count] + [pending count],
+                                 @"fetcher count off");
+                  STAssertEquals([service numberOfRunningFetchers],
+                                 [running count], @"running off");
+                  STAssertEquals([service numberOfDelayedFetchers],
+                                 [pending count], @"delayed off");
+
+                  NSArray *matches =
+                    [service issuedFetchersWithRequestURL:fetcherReqURL];
+                  NSUInteger idx = NSNotFound;
+                  if (matches) {
+                    idx = [matches indexOfObjectIdenticalTo:fetcher];
+                  }
+                  STAssertTrue(idx != NSNotFound, @"Missing %@ in %@",
+                               fetcherReqURL, matches);
+                  NSURL *fakeURL =
+                    [NSURL URLWithString:@"http://example.com/bad"];
+                  matches = [service issuedFetchersWithRequestURL:fakeURL];
+                  STAssertEquals([matches count], (NSUInteger)0, nil);
+
+                  NSString *agent = [fetcherReq valueForHTTPHeaderField:@"User-Agent"];
+                  STAssertEqualObjects(agent, kUserAgent, nil);
+                  STAssertEquals([fetcherReq timeoutInterval], kTimeout, nil);
                 }];
 
     // Fetcher stopped notification
@@ -155,14 +207,28 @@ static NSString *const kValidFileName = @"gettysburgaddress.txt";
                   NSUInteger numberPending = FetchersPerHost(pending, host);
                   NSUInteger numberCompleted = FetchersPerHost(completed, host);
 
-                  STAssertTrue(numberRunning <= kMaxRunningFetchersPerHost, @"too many running");
+                  STAssertTrue(numberRunning <= kMaxRunningFetchersPerHost,
+                               @"too many running");
                   STAssertTrue(numberPending + numberRunning + numberCompleted <= URLsPerHost(urlArray, host),
                                @"%d issued running (pending:%u running:%u completed:%u)",
                                totalNumberOfFetchers, (unsigned int)numberPending,
                                (unsigned int)numberRunning, (unsigned int)numberCompleted);
+
+                  STAssertEquals([service numberOfFetchers],
+                                 [running count] + [pending count] + 1,
+                                 @"fetcher count off");
+                  STAssertEquals([service numberOfRunningFetchers],
+                                 [running count] + 1, @"running off");
+                  STAssertEquals([service numberOfDelayedFetchers],
+                                 [pending count], @"delayed off");
                 }];
 
     [pending addObject:fetcher];
+
+    // Set the fetch priority to a value that cycles 0, 1, -1, 0, ...
+    priorityVal++;
+    if (priorityVal > 1) priorityVal = -1;
+    fetcher.servicePriority = priorityVal;
 
     // Start this fetcher
     [fetcher beginFetchWithCompletionHandler:^(NSData *fetchData, NSError *fetchError) {
@@ -178,19 +244,22 @@ static NSString *const kValidFileName = @"gettysburgaddress.txt";
                     fetchError, [fetchError userInfo]);
       } else {
         // This is the query with ?status=400
-        STAssertEquals((NSInteger) 400, [fetchError code], @"expected error");
+        STAssertEquals([fetchError code], (NSInteger) 400, @"expected error");
       }
     }];
   }
 
-  while ([running count] > 0) {
-    GTMHTTPFetcher *fetcher = [running objectAtIndex:0];
-    [fetcher waitForCompletionWithTimeout:10];
-  }
+  [service waitForCompletionOfAllFetchersWithTimeout:10];
 
-  STAssertEquals((NSUInteger) 0, [pending count], @"still pending: %@", pending);
-  STAssertEquals((NSUInteger) 0, [running count], @"still running: %@", running);
-  STAssertEquals((NSUInteger) totalNumberOfFetchers, [completed count], @"incomplete");
+  STAssertEquals([pending count], (NSUInteger) 0,
+                 @"still pending: %@", pending);
+  STAssertEquals([running count], (NSUInteger) 0,
+                 @"still running: %@", running);
+  STAssertEquals([completed count], (NSUInteger) totalNumberOfFetchers,
+                 @"incomplete");
+
+  STAssertEquals([service numberOfFetchers], (NSUInteger) 0,
+                 @"service non-empty");
 }
 
 - (void)testStopAllFetchers {
